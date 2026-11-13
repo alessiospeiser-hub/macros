@@ -881,7 +881,7 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
 
   /* ---------- cloud sync (Worker /sync, same code as the AI) ---------- */
   var SYNC_URL = AI_URL ? AI_URL.replace(/\/estimate$/, "/sync") : "";
-  var sync = { timer: null, busy: false, again: false, at: 0, error: null };
+  var sync = { timer: null, busy: false, again: false, at: 0, error: null, announce: false };
 
   function canon(s) { return L.mergeState(s, null); }
   function scheduleSync(delay) {
@@ -926,14 +926,23 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
     if (!SYNC_URL || !getCode()) { renderSyncStatus(); return; }
     if (sync.busy) { sync.again = true; return; }
     clearTimeout(sync.timer);
+    var announce = sync.announce; sync.announce = false;
     sync.busy = true; renderSyncStatus();
     syncOnce(0)
       .then(function () { sync.at = Date.now(); sync.error = null; },
             function (e) { sync.error = (e && e.code) || "network"; })
       .then(function () {
         sync.busy = false; renderSyncStatus();
+        if (announce) toast(syncResultText());
         if (sync.again) { sync.again = false; scheduleSync(300); }
       });
+  }
+  // Short result shown as a toast right after the code is entered (Settings closes on save).
+  function syncResultText() {
+    if (!sync.error) return "Synced. Your data is on all your devices.";
+    if (sync.error === "unauthorized") return "Sync failed: the code is wrong.";
+    if (sync.error === "offline") return "Offline. It will sync when you’re back online.";
+    return "Sync failed. It will try again automatically.";
   }
   function renderSyncStatus() {
     var el = $("sync-status");
@@ -1369,8 +1378,9 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
     var codeChanged = TCODE.value.trim() !== getCode();
     setCode(TCODE.value.trim());
     if (codeChanged) sync.error = null;
+    if (codeChanged && getCode()) sync.announce = true;
     save(); render(); closeSheet();
-    toast("Settings saved");
+    toast(sync.announce ? "Settings saved. Syncing…" : "Settings saved");
     syncNow();
   });
 
