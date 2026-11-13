@@ -481,8 +481,9 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
       <div class="field"><label for="t-c" class="lc">Carbs</label><input id="t-c" inputmode="decimal" enterkeyhint="next"><span class="unit">g</span></div>
     </div>
     <div class="group">
-      <div class="field"><label for="t-code">AI code</label><input id="t-code" type="password" placeholder="Access code" autocomplete="off" autocapitalize="none" autocorrect="off" enterkeyhint="done"><span class="unit"></span></div>
+      <div class="field"><label for="t-code">Code</label><input id="t-code" type="password" placeholder="For AI and sync" autocomplete="off" autocapitalize="none" autocorrect="off" enterkeyhint="done"><span class="unit"></span></div>
     </div>
+    <p class="hint" id="sync-status"></p>
     <p class="hint" id="settings-hint"></p>
     <button type="submit" class="btn-primary">Save</button>
   </form>
@@ -532,8 +533,57 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
     var next = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
     return next - d;
   }
+  // Merge two copies of the app data (this device + the cloud) so both converge.
+  // Entries are unioned by id; deletions are kept as tombstones so they win;
+  // the most recently used version of a saved food wins; the latest targets edit wins.
+  // Keys are emitted in sorted order so merging the same data twice gives identical JSON.
+  function sortedKeys(o) { return Object.keys(o || {}).sort(); }
+  function maxMap(x, y) {
+    var out = {}, all = {};
+    sortedKeys(x).concat(sortedKeys(y)).forEach(function (k) { all[k] = 1; });
+    Object.keys(all).sort().forEach(function (k) { out[k] = Math.max((x && x[k]) || 0, (y && y[k]) || 0); });
+    return out;
+  }
+  function mergeState(a, b) {
+    a = a || {}; b = b || {};
+    var deleted = maxMap(a.deleted, b.deleted);
+    var deletedFoods = maxMap(a.deletedFoods, b.deletedFoods);
+    var ad = a.days || {}, bd = b.days || {}, dayKeys = {};
+    Object.keys(ad).concat(Object.keys(bd)).forEach(function (k) { dayKeys[k] = 1; });
+    var days = {};
+    Object.keys(dayKeys).sort().forEach(function (k) {
+      var byId = {};
+      [ad[k], bd[k]].forEach(function (d) {
+        ((d && d.entries) || []).forEach(function (e) {
+          if (e && e.id && !deleted[e.id] && !byId[e.id]) byId[e.id] = e;
+        });
+      });
+      var entries = Object.keys(byId).map(function (id) { return byId[id]; })
+        .sort(function (x, y) { return ((x.t || 0) - (y.t || 0)) || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0); });
+      days[k] = { targets: (ad[k] && ad[k].targets) || (bd[k] && bd[k].targets) || null, entries: entries };
+    });
+    var af = a.foods || {}, bf = b.foods || {}, foodKeys = {}, foods = {};
+    Object.keys(af).concat(Object.keys(bf)).forEach(function (k) { foodKeys[k] = 1; });
+    Object.keys(foodKeys).sort().forEach(function (k) {
+      var fa = af[k], fb = bf[k];
+      var win = fa && fb ? ((fb.last || 0) > (fa.last || 0) ? fb : fa) : (fa || fb);
+      if (deletedFoods[k] && deletedFoods[k] >= (win.last || 0)) return;
+      var copy = {};
+      Object.keys(win).sort().forEach(function (p) { copy[p] = win[p]; });
+      copy.count = Math.max((fa && fa.count) || 0, (fb && fb.count) || 0);
+      foods[k] = copy;
+    });
+    var useB = b.targets && (!a.targets || (b.targetsAt || 0) > (a.targetsAt || 0));
+    var out = {
+      days: days, deleted: deleted, deletedFoods: deletedFoods, foods: foods,
+      targets: useB ? b.targets : a.targets, targetsAt: Math.max(a.targetsAt || 0, b.targetsAt || 0)
+    };
+    if (!out.targets) delete out.targets;
+    return out;
+  }
   window.Logic = { dateKey: dateKey, parseNum: parseNum, kcalFromMacros: kcalFromMacros, entryKcal: entryKcal,
-    totals: totals, isHit: isHit, remaining: remaining, rankFoods: rankFoods, msUntilMidnight: msUntilMidnight };
+    totals: totals, isHit: isHit, remaining: remaining, rankFoods: rankFoods, msUntilMidnight: msUntilMidnight,
+    mergeState: mergeState };
 })();
 </script>
 
@@ -563,24 +613,30 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
   /* ---------- storage ---------- */
-  function fresh() { return { targets: Object.assign({}, DEFAULT_TARGETS), days: {}, foods: {} }; }
+  function obj(x) { return x && typeof x === "object" && !Array.isArray(x) ? x : {}; }
+  function normalize(s) {
+    s = obj(s);
+    return {
+      targets: Object.assign({}, DEFAULT_TARGETS, obj(s.targets)),
+      targetsAt: s.targetsAt || 0,
+      days: obj(s.days),
+      foods: obj(s.foods),
+      deleted: obj(s.deleted),          // entry id -> time deleted (so deletes sync)
+      deletedFoods: obj(s.deletedFoods) // food key -> time removed from recent
+    };
+  }
   function load() {
     try {
-      var s = JSON.parse(localStorage.getItem(STORE));
-      if (s && typeof s === "object") {
-        return {
-          targets: Object.assign({}, DEFAULT_TARGETS, s.targets || {}),
-          days: s.days && typeof s.days === "object" ? s.days : {},
-          foods: s.foods && typeof s.foods === "object" ? s.foods : {}
-        };
-      }
+      var raw = localStorage.getItem(STORE);
+      if (raw) return normalize(JSON.parse(raw));
     } catch (e) { /* corrupt or blocked storage: start fresh */ }
-    return fresh();
+    return normalize(null);
   }
-  function save() {
+  function persist() {
     try { localStorage.setItem(STORE, JSON.stringify(state)); }
     catch (e) { toast("Couldn't save. Your storage may be full."); }
   }
+  function save() { persist(); scheduleSync(); }
 
   var state = load();
   var todayKey = L.dateKey(new Date());
@@ -808,10 +864,12 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
     var i = d.entries.findIndex(function (e) { return e.id === id; });
     if (i < 0) return null;
     var e = d.entries.splice(i, 1)[0];
+    state.deleted[e.id] = Date.now();
     save(); render();
     return { key: key, entry: e, index: i };
   }
   function restoreEntry(r) {
+    delete state.deleted[r.entry.id];
     var d = ensureDay(r.key);
     d.entries.splice(Math.min(r.index, d.entries.length), 0, r.entry);
     save(); render();
@@ -820,6 +878,85 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
     var r = removeEntry(key, id);
     if (r) toast("Deleted " + (r.entry.name || "entry"), function () { restoreEntry(r); });
   }
+
+  /* ---------- cloud sync (Worker /sync, same code as the AI) ---------- */
+  var SYNC_URL = AI_URL ? AI_URL.replace(/\/estimate$/, "/sync") : "";
+  var sync = { timer: null, busy: false, again: false, at: 0, error: null };
+
+  function canon(s) { return L.mergeState(s, null); }
+  function scheduleSync(delay) {
+    if (!SYNC_URL || !getCode()) return;
+    clearTimeout(sync.timer);
+    sync.timer = setTimeout(syncNow, delay == null ? 1200 : delay);
+  }
+  function syncApi(method, body) {
+    var ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, 20000);
+    return fetch(SYNC_URL, {
+      method: method,
+      headers: { "Content-Type": "application/json", "X-App-Code": getCode() },
+      body: body ? JSON.stringify(body) : undefined,
+      cache: "no-store",
+      signal: ctl ? ctl.signal : undefined
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (data) {
+        if (!res.ok) throw { code: (data.error && data.error.code) || "http" };
+        return data;
+      });
+    }).then(function (v) { clearTimeout(timer); return v; }, function (e) {
+      clearTimeout(timer);
+      throw e && e.code ? e : { code: navigator.onLine === false ? "offline" : "network" };
+    });
+  }
+  // Pull, merge with this device, push back if anything is new. A 409 means another
+  // device saved in between: pull again and re-merge, so nothing is overwritten.
+  function syncOnce(tries) {
+    return syncApi("GET").then(function (remote) {
+      var merged = normalize(L.mergeState(state, remote.state));
+      if (JSON.stringify(merged) !== JSON.stringify(state)) { state = merged; persist(); render(); }
+      var mine = canon(state);
+      if (remote.state && JSON.stringify(mine) === JSON.stringify(canon(remote.state))) return;
+      return syncApi("PUT", { state: mine, baseVersion: remote.version || 0 }).catch(function (e) {
+        if (e.code === "conflict" && tries < 3) return syncOnce(tries + 1);
+        throw e;
+      });
+    });
+  }
+  function syncNow() {
+    if (!SYNC_URL || !getCode()) { renderSyncStatus(); return; }
+    if (sync.busy) { sync.again = true; return; }
+    clearTimeout(sync.timer);
+    sync.busy = true; renderSyncStatus();
+    syncOnce(0)
+      .then(function () { sync.at = Date.now(); sync.error = null; },
+            function (e) { sync.error = (e && e.code) || "network"; })
+      .then(function () {
+        sync.busy = false; renderSyncStatus();
+        if (sync.again) { sync.again = false; scheduleSync(300); }
+      });
+  }
+  function renderSyncStatus() {
+    var el = $("sync-status");
+    if (!SYNC_URL) { el.textContent = ""; return; }
+    var msg;
+    if (!getCode()) msg = "Add your code to use AI and keep your data in sync on all your devices.";
+    else if (sync.busy && !sync.at) msg = "Syncing…";
+    else if (sync.error === "unauthorized") msg = "Sync failed: the code is wrong.";
+    else if (sync.error === "offline") msg = "Offline. Your changes will sync when you’re back online.";
+    else if (sync.error) msg = "Sync failed. It will try again automatically.";
+    else if (sync.at) {
+      var mins = Math.floor((Date.now() - sync.at) / 60000);
+      msg = "Synced " + (mins < 1 ? "just now" : mins + " min ago") + ". Your data is backed up and on all your devices.";
+    } else msg = "Syncing…";
+    el.textContent = msg;
+    el.classList.toggle("error", !!sync.error && sync.error !== "offline");
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) syncNow();
+    else if (sync.timer) syncNow(); // flush a pending change before the app is closed
+  });
+  window.addEventListener("online", syncNow);
+  setInterval(function () { if (!document.hidden) syncNow(); }, 30000);
 
   /* ---------- swipe to delete ---------- */
   var openRow = null;
@@ -1169,7 +1306,9 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
         if (!food) return;
         if (navigator.vibrate) navigator.vibrate(10);
         showActions(food.name, [{ label: "Remove from recent", destructive: true, run: function () {
-          delete state.foods[chip.dataset.key]; save(); renderChips();
+          delete state.foods[chip.dataset.key];
+          state.deletedFoods[chip.dataset.key] = Date.now();
+          save(); renderChips();
         } }]);
       }, 550);
     });
@@ -1195,6 +1334,7 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
   $("open-settings").addEventListener("click", function () {
     Object.keys(T).forEach(function (k) { T[k].value = state.targets[k]; T[k].closest(".field").classList.remove("invalid"); });
     TCODE.value = getCode();
+    renderSyncStatus();
     $("settings-hint").textContent = ""; $("settings-hint").classList.remove("error");
     openSheet("sheet-settings");
   });
@@ -1220,11 +1360,16 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
       $("settings-hint").classList.add("error");
       return;
     }
+    var changed = JSON.stringify(next) !== JSON.stringify(state.targets);
     state.targets = next;
+    if (changed) state.targetsAt = Date.now();
     if (state.days[todayKey]) state.days[todayKey].targets = Object.assign({}, next);
+    var codeChanged = TCODE.value.trim() !== getCode();
     setCode(TCODE.value.trim());
+    if (codeChanged) sync.error = null;
     save(); render(); closeSheet();
     toast("Settings saved");
+    syncNow();
   });
 
   /* ---------- history detail ---------- */
@@ -1252,6 +1397,7 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
   void $("today-rings").offsetWidth;
   render();
   checkDay();
+  syncNow();
 
   if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) {
     window.addEventListener("load", function () { navigator.serviceWorker.register("sw.js").catch(function () {}); });

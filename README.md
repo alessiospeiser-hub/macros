@@ -74,7 +74,13 @@ Put that URL plus `/estimate` into `AI_PROD_URL` in `index.html`, push, then ent
 - On the free tier, Google may use what you type to improve its products.
 - Worker tests: `node --test worker/test/worker.test.mjs`
 
+## Sync across devices
+Enter your code under Settings → Code on every device (iPhone, Mac browser, iPad). Your data then lives in your Cloudflare account (D1 database `macros-db`) and stays the same on all of them:
+- It syncs when the app opens, about a second after every change, every 30 seconds while open, and when you come back online.
+- If two devices change things at the same time, the changes are merged. Entries from both are kept, and a deletion on one device removes the entry everywhere.
+- It works offline and catches up later. Settings shows when it last synced.
+- Deleting the home-screen app no longer loses anything: add it again, enter the code, and everything comes back.
+
 ## Good to know
-- **Your data lives only on that device**, inside the installed app. Deleting the home-screen app, or clearing Safari website data, erases it. There's no backup or sync.
 - **Updates:** after you upload a new version, open the app twice. The first launch downloads the update in the background, and the second one shows it.
 - **Midnight:** each day is stored separately, so a new day starts automatically. Past days are in History.

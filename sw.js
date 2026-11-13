@@ -1,6 +1,6 @@
 // Offline support: serve the app from cache, refresh the cache in the background.
 // Updates you deploy show up the next time the app is opened.
-const CACHE = "macros-v2";
+const CACHE = "macros-v3";
 const SHELL = [
   "./",
   "./index.html",

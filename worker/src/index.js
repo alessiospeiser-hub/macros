@@ -85,7 +85,7 @@ export function parseEstimate(text) {
 function corsHeaders(origin) {
   return {
     "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, X-App-Code",
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin",
@@ -134,12 +134,13 @@ export async function handle(request, env, fetchImpl = fetch) {
 
   if (origin && !okOrigin) return fail(403, "forbidden_origin", "This origin is not allowed.", null);
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: okOrigin ? corsHeaders(okOrigin) : {} });
-  if (url.pathname !== "/estimate") return fail(404, "not_found", "Not found.", okOrigin);
-  if (request.method !== "POST") return fail(405, "method_not_allowed", "Use POST.", okOrigin);
+  if (url.pathname !== "/estimate" && url.pathname !== "/sync") return fail(404, "not_found", "Not found.", okOrigin);
 
   if (env.APP_PASSCODE && !sameSecret(request.headers.get("X-App-Code") || "", String(env.APP_PASSCODE))) {
     return fail(401, "unauthorized", "Missing or wrong access code.", okOrigin);
   }
+  if (url.pathname === "/sync") return handleSync(request, env, okOrigin);
+  if (request.method !== "POST") return fail(405, "method_not_allowed", "Use POST.", okOrigin);
   if (!env.GEMINI_API_KEY) return fail(500, "not_configured", "GEMINI_API_KEY is not set on the server.", okOrigin);
 
   let text;
@@ -181,6 +182,66 @@ export async function handle(request, env, fetchImpl = fetch) {
     if (e instanceof EstimateError) return fail(502, "bad_json", "The AI's answer couldn't be read. Try again.", okOrigin);
     throw e;
   }
+}
+
+// ---------- /sync: one copy of the app data, shared by all your devices ----------
+// GET  /sync -> {"state": {...} | null, "version": n}
+// PUT  /sync  body {"state": {...}, "baseVersion": n} -> {"version": n+1}
+//      409 {"error":{"code":"conflict"}, "version": current} if someone else saved first;
+//      the app then pulls, merges and retries, so no device overwrites another.
+// Stored gzip-compressed in one D1 row (binding DB). Requires APP_PASSCODE.
+const SYNC_MAX_BYTES = 8_000_000;
+let tableReady = false;
+
+async function ensureTable(db) {
+  if (tableReady) return;
+  await db.prepare("CREATE TABLE IF NOT EXISTS store (id TEXT PRIMARY KEY, data BLOB NOT NULL, version INTEGER NOT NULL, updated INTEGER NOT NULL)").run();
+  tableReady = true;
+}
+async function gzip(text) {
+  const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+async function gunzip(bytes) {
+  const stream = new Blob([new Uint8Array(bytes)]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Response(stream).text();
+}
+
+async function handleSync(request, env, origin) {
+  if (!env.APP_PASSCODE) return fail(500, "not_configured", "Set APP_PASSCODE to enable sync.", origin);
+  if (!env.DB) return fail(500, "not_configured", "Sync storage (D1 binding DB) is not set up.", origin);
+  await ensureTable(env.DB);
+
+  if (request.method === "GET") {
+    const row = await env.DB.prepare("SELECT data, version, updated FROM store WHERE id = 'main'").first();
+    if (!row) return json(200, { state: null, version: 0 }, origin, { "Cache-Control": "no-store" });
+    return json(200, { state: JSON.parse(await gunzip(row.data)), version: row.version, updated: row.updated }, origin, { "Cache-Control": "no-store" });
+  }
+
+  if (request.method === "PUT") {
+    let body;
+    try { body = await request.json(); } catch { return fail(400, "bad_request", "Send JSON.", origin); }
+    const state = body && body.state;
+    const base = body && body.baseVersion;
+    if (!state || typeof state !== "object" || Array.isArray(state) || typeof state.days !== "object") {
+      return fail(400, "bad_request", "Missing state.", origin);
+    }
+    if (!Number.isInteger(base) || base < 0) return fail(400, "bad_request", "Missing baseVersion.", origin);
+    const text = JSON.stringify(state);
+    if (text.length > SYNC_MAX_BYTES) return fail(413, "too_large", "Your data is too large to sync.", origin);
+    const data = await gzip(text);
+    const now = Date.now();
+    const result = base === 0
+      ? await env.DB.prepare("INSERT OR IGNORE INTO store (id, data, version, updated) VALUES ('main', ?, 1, ?)").bind(data, now).run()
+      : await env.DB.prepare("UPDATE store SET data = ?, version = version + 1, updated = ? WHERE id = 'main' AND version = ?").bind(data, now, base).run();
+    if (!result.meta || !result.meta.changes) {
+      const row = await env.DB.prepare("SELECT data, version, updated FROM store WHERE id = 'main'").first();
+      return json(409, { error: { code: "conflict", message: "Data changed on another device." }, version: row ? row.version : 0 }, origin);
+    }
+    return json(200, { version: base + 1, updated: now }, origin);
+  }
+
+  return fail(405, "method_not_allowed", "Use GET or PUT.", origin);
 }
 
 export default {

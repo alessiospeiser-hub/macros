@@ -18,7 +18,7 @@ function req(body, { origin = ORIGIN, code = "1234", method = "POST", path = "/e
   return new Request("https://worker.example" + path, {
     method,
     headers,
-    body: method === "POST" ? JSON.stringify(body) : undefined,
+    body: method === "POST" || method === "PUT" ? JSON.stringify(body) : undefined,
   });
 }
 
@@ -129,4 +129,87 @@ test("missing API key reports not_configured", async () => {
   const res = await worker.fetch(req({ text: "Apfel" }), { ...ENV, GEMINI_API_KEY: "" }, null, gemini("").fetchImpl);
   assert.equal(res.status, 500);
   assert.equal((await res.json()).error.code, "not_configured");
+});
+
+// ---------- /sync ----------
+function fakeDB() {
+  let row = null;
+  const db = {
+    get row() { return row; },
+    prepare(sql) {
+      const stmt = (args) => ({
+        bind: (...a) => stmt(a),
+        async first() { return /^SELECT/.test(sql) && row ? { ...row } : null; },
+        async run() {
+          if (/^CREATE/.test(sql)) return { meta: { changes: 0 } };
+          if (/^INSERT/.test(sql)) {
+            if (row) return { meta: { changes: 0 } };
+            row = { data: args[0], version: 1, updated: args[1] };
+            return { meta: { changes: 1 } };
+          }
+          if (/^UPDATE/.test(sql)) {
+            if (!row || row.version !== args[2]) return { meta: { changes: 0 } };
+            row = { data: args[0], version: row.version + 1, updated: args[1] };
+            return { meta: { changes: 1 } };
+          }
+          throw new Error("unexpected SQL " + sql);
+        },
+      });
+      return stmt([]);
+    },
+  };
+  return db;
+}
+function syncReq(method, body, opts = {}) {
+  return req(body, { ...opts, method, path: "/sync" });
+}
+const STATE = { targets: { kcal: 2750, p: 165, f: 70, c: 350 }, days: { "2026-11-13": { entries: [{ id: "x", name: "Gipfeli", kcal: 230, p: 5, f: 12, c: 25, t: 1 }] } }, foods: {} };
+
+test("sync: empty store returns null state at version 0", async () => {
+  const env = { ...ENV, DB: fakeDB() };
+  const res = await worker.fetch(new Request("https://w/sync", { method: "GET", headers: { Origin: ORIGIN, "X-App-Code": "1234" } }), env);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { state: null, version: 0 });
+});
+
+test("sync: PUT then GET round-trips the data (stored compressed)", async () => {
+  const env = { ...ENV, DB: fakeDB() };
+  const put = await worker.fetch(syncReq("PUT", { state: STATE, baseVersion: 0 }), env);
+  assert.equal(put.status, 200);
+  assert.equal((await put.json()).version, 1);
+  assert.ok(env.DB.row.data instanceof Uint8Array);
+  const get = await worker.fetch(new Request("https://w/sync", { method: "GET", headers: { Origin: ORIGIN, "X-App-Code": "1234" } }), env);
+  const body = await get.json();
+  assert.equal(body.version, 1);
+  assert.deepEqual(body.state, STATE);
+});
+
+test("sync: stale baseVersion is a 409 conflict, nothing overwritten", async () => {
+  const env = { ...ENV, DB: fakeDB() };
+  await worker.fetch(syncReq("PUT", { state: STATE, baseVersion: 0 }), env);
+  const res = await worker.fetch(syncReq("PUT", { state: { ...STATE, foods: { a: {} } }, baseVersion: 0 }), env);
+  assert.equal(res.status, 409);
+  const body = await res.json();
+  assert.equal(body.error.code, "conflict");
+  assert.equal(env.DB.row.version, 1);
+});
+
+test("sync: wrong code is rejected", async () => {
+  const env = { ...ENV, DB: fakeDB() };
+  const res = await worker.fetch(syncReq("PUT", { state: STATE, baseVersion: 0 }, { code: "nope" }), env);
+  assert.equal(res.status, 401);
+  assert.equal(env.DB.row, null);
+});
+
+test("sync: refuses to run without a passcode configured", async () => {
+  const env = { ...ENV, APP_PASSCODE: "", DB: fakeDB() };
+  const res = await worker.fetch(syncReq("PUT", { state: STATE, baseVersion: 0 }), env);
+  assert.equal(res.status, 500);
+  assert.equal((await res.json()).error.code, "not_configured");
+});
+
+test("sync: invalid body is a 400", async () => {
+  const env = { ...ENV, DB: fakeDB() };
+  assert.equal((await worker.fetch(syncReq("PUT", { state: "nope", baseVersion: 0 }), env)).status, 400);
+  assert.equal((await worker.fetch(syncReq("PUT", { state: STATE }), env)).status, 400);
 });
