@@ -1157,6 +1157,8 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
       case "bad_model": return "That Gemini model isn’t available. Change GEMINI_MODEL in worker/wrangler.toml.";
       case "not_food": return "That doesn’t look like food. Try describing it differently.";
       case "timeout": return "The AI took too long to answer. Try again.";
+      case "overloaded": return "Gemini is very busy right now. Try again in a moment, or type the numbers below.";
+      case "upstream_unreachable": return "Couldn’t reach Gemini. Try again in a moment.";
       case "offline": return "You’re offline. Type the numbers below instead.";
       case "network": return "Couldn’t reach the AI. Check your connection and try again.";
       case "no_url": return "AI isn’t set up yet. See the README to connect it.";

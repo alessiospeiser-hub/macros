@@ -69,7 +69,7 @@ npx wrangler deploy                       # prints https://macros-ai.<you>.worke
 Put that URL plus `/estimate` into `AI_PROD_URL` in `index.html`, push, then enter your code on the phone under Settings → AI code. (Current Worker: https://macros-ai.macros-ai.workers.dev)
 
 ### Model and limits
-- The model is set in `worker/wrangler.toml` (`GEMINI_MODEL`, default `gemini-3.8-flash`). To change it, edit that line and run `npx wrangler deploy`. No app change is needed.
+- The models are set in `worker/wrangler.toml` (`GEMINI_MODEL`, currently `gemini-3.5-flash-lite,gemini-3.6-flash`). They're tried in order: if one is busy, slow (8 s per try) or rate-limited, the next one answers. To change them, edit that line and run `npx wrangler deploy`. No app change is needed.
 - If Gemini's free limit is reached, the app says so, and you can type the numbers by hand.
 - On the free tier, Google may use what you type to improve its products.
 - Worker tests: `node --test worker/test/worker.test.mjs`

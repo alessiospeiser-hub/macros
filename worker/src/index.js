@@ -8,13 +8,17 @@
 // Config (wrangler.toml [vars] / secrets / .dev.vars):
 //   GEMINI_API_KEY   secret, required
 //   APP_PASSCODE     secret, optional but recommended for a public app
-//   GEMINI_MODEL     defaults to DEFAULT_MODEL
+//   GEMINI_MODEL     comma-separated models, tried in order (defaults to DEFAULT_MODELS)
 //   ALLOWED_ORIGINS  comma-separated list of origins allowed to call this
 
-const DEFAULT_MODEL = "gemini-3.8-flash";
+// Free-tier Flash models are often overloaded (503 "high demand") or slow. Flash-Lite
+// answered in ~1 s every time in testing, so it goes first; if a model is busy,
+// rate-limited, slow or returns junk, the next one is tried within a fixed time budget.
+const DEFAULT_MODELS = ["gemini-3.5-flash-lite", "gemini-3.6-flash"];
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models/";
 const MAX_TEXT = 300;
-const TIMEOUT_MS = 25000;
+const ATTEMPT_MS = 8000;  // per model attempt
+const TOTAL_MS = 22000;   // whole request (the app waits 30 s)
 
 const SYSTEM_PROMPT = `You estimate calories and macronutrients for a personal calorie tracker used in Switzerland.
 The user describes what they ate, in German, Swiss German or English.
@@ -107,8 +111,13 @@ function sameSecret(a, b) {
   return diff === 0;
 }
 
-async function callGemini(text, env, fetchImpl) {
-  const model = (env.GEMINI_MODEL || DEFAULT_MODEL).trim();
+function modelList(env) {
+  const list = String(env.GEMINI_MODEL || "").split(",").map((s) => s.trim()).filter(Boolean);
+  return list.length ? list : DEFAULT_MODELS;
+}
+
+/** One call to one model. Resolves to {ok:true, estimate} or {ok:false, code, status, retryable}. */
+async function tryModel(model, text, env, fetchImpl, timeoutMs) {
   const body = {
     systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
     contents: [{ role: "user", parts: [{ text: `What I ate: ${text}` }] }],
@@ -118,12 +127,74 @@ async function callGemini(text, env, fetchImpl) {
       thinkingConfig: { thinkingLevel: "low" },
     },
   };
-  return fetchImpl(GEMINI_BASE + encodeURIComponent(model) + ":generateContent", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
+  let res;
+  try {
+    res = await fetchImpl(GEMINI_BASE + encodeURIComponent(model) + ":generateContent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (e) {
+    const timeout = e && (e.name === "TimeoutError" || e.name === "AbortError");
+    return { ok: false, code: timeout ? "timeout" : "upstream_unreachable", status: 504, retryable: true };
+  }
+
+  if (!res.ok) {
+    let detail = {};
+    try { detail = (await res.json()).error || {}; } catch {}
+    const msg = String(detail.message || "").slice(0, 200);
+    if (res.status === 429) return { ok: false, code: "rate_limited", status: 429, retryable: true, msg };
+    if (/API_KEY|API key/i.test(JSON.stringify(detail))) return { ok: false, code: "bad_key", status: 502, retryable: false, msg };
+    if (res.status === 404) return { ok: false, code: "bad_model", status: 502, retryable: true, msg };
+    if (res.status >= 500) return { ok: false, code: "overloaded", status: 503, retryable: true, msg };
+    return { ok: false, code: "upstream", status: 502, retryable: false, msg: `Gemini error ${res.status}: ${msg}` };
+  }
+
+  let data;
+  try { data = await res.json(); } catch { return { ok: false, code: "bad_json", status: 502, retryable: true }; }
+  const cand = data && data.candidates && data.candidates[0];
+  const parts = (cand && cand.content && cand.content.parts) || [];
+  const answer = parts.filter((p) => !p.thought && typeof p.text === "string").map((p) => p.text).join("");
+  if (!answer) return { ok: false, code: "no_answer", status: 502, retryable: true, msg: (cand && cand.finishReason) || "" };
+  try {
+    return { ok: true, estimate: parseEstimate(answer) };
+  } catch (e) {
+    if (e instanceof EstimateError) return { ok: false, code: "bad_json", status: 502, retryable: true };
+    throw e;
+  }
+}
+
+const MESSAGES = {
+  rate_limited: "Gemini's free-tier limit was reached. Try again in a minute.",
+  overloaded: "Gemini is very busy right now. Try again in a moment.",
+  timeout: "Gemini took too long to answer.",
+  upstream_unreachable: "Couldn't reach Gemini.",
+  bad_key: "Gemini rejected the API key.",
+  bad_model: "None of the configured Gemini models are available.",
+  bad_json: "The AI's answer couldn't be read. Try again.",
+  no_answer: "Gemini returned no answer.",
+};
+
+/** Try each model in order (then the first again) until one answers, within TOTAL_MS. */
+async function estimate(text, env, fetchImpl) {
+  const models = modelList(env);
+  const plan = [...models, models[0]];
+  const perAttempt = Number(env.ATTEMPT_TIMEOUT_MS) || ATTEMPT_MS;
+  const total = Number(env.TOTAL_TIMEOUT_MS) || TOTAL_MS;
+  const start = Date.now();
+  let last = { ok: false, code: "timeout", status: 504 };
+  for (const model of plan) {
+    const left = total - (Date.now() - start);
+    if (left < Math.min(1000, perAttempt)) break;
+    const t0 = Date.now();
+    const r = await tryModel(model, text, env, fetchImpl, Math.min(perAttempt, left));
+    console.log(JSON.stringify({ ai: model, ok: r.ok, code: r.code, ms: Date.now() - t0, msg: r.msg }));
+    if (r.ok) return r;
+    last = r;
+    if (!r.retryable) break;
+  }
+  return last;
 }
 
 export async function handle(request, env, fetchImpl = fetch) {
@@ -149,39 +220,9 @@ export async function handle(request, env, fetchImpl = fetch) {
   if (!text) return fail(400, "bad_request", "Describe what you ate.", okOrigin);
   if (text.length > MAX_TEXT) return fail(400, "bad_request", `Keep it under ${MAX_TEXT} characters.`, okOrigin);
 
-  let res;
-  try { res = await callGemini(text, env, fetchImpl); }
-  catch (e) {
-    const timeout = e && (e.name === "TimeoutError" || e.name === "AbortError");
-    return fail(504, timeout ? "timeout" : "upstream_unreachable", timeout ? "Gemini took too long to answer." : "Couldn't reach Gemini.", okOrigin);
-  }
-
-  if (!res.ok) {
-    let detail = {};
-    try { detail = (await res.json()).error || {}; } catch {}
-    if (res.status === 429) {
-      const ra = res.headers.get("Retry-After");
-      return fail(429, "rate_limited", "Gemini's free-tier limit was reached. Try again in a minute.", okOrigin, ra ? { "Retry-After": ra } : {});
-    }
-    const badKey = /API_KEY|API key/i.test(JSON.stringify(detail));
-    if (badKey) return fail(502, "bad_key", "Gemini rejected the API key.", okOrigin);
-    if (res.status === 404) return fail(502, "bad_model", `Model not available: ${env.GEMINI_MODEL || DEFAULT_MODEL}.`, okOrigin);
-    return fail(502, "upstream", `Gemini error ${res.status}: ${String(detail.message || "").slice(0, 200)}`, okOrigin);
-  }
-
-  let data;
-  try { data = await res.json(); } catch { return fail(502, "bad_json", "Gemini returned an unreadable reply.", okOrigin); }
-  const cand = data && data.candidates && data.candidates[0];
-  const parts = (cand && cand.content && cand.content.parts) || [];
-  const answer = parts.filter((p) => !p.thought && typeof p.text === "string").map((p) => p.text).join("");
-  if (!answer) return fail(502, "no_answer", `Gemini returned no answer (${(cand && cand.finishReason) || "unknown"}).`, okOrigin);
-
-  try {
-    return json(200, parseEstimate(answer), okOrigin);
-  } catch (e) {
-    if (e instanceof EstimateError) return fail(502, "bad_json", "The AI's answer couldn't be read. Try again.", okOrigin);
-    throw e;
-  }
+  const r = await estimate(text, env, fetchImpl);
+  if (r.ok) return json(200, r.estimate, okOrigin);
+  return fail(r.status, r.code, r.code === "upstream" ? r.msg : (MESSAGES[r.code] || "Gemini error."), okOrigin);
 }
 
 // ---------- /sync: one copy of the app data, shared by all your devices ----------

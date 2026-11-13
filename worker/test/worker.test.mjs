@@ -213,3 +213,61 @@ test("sync: invalid body is a 400", async () => {
   assert.equal((await worker.fetch(syncReq("PUT", { state: "nope", baseVersion: 0 }), env)).status, 400);
   assert.equal((await worker.fetch(syncReq("PUT", { state: STATE }), env)).status, 400);
 });
+
+// ---------- model fallback (root cause: primary model returned 503 "high demand" / hung) ----------
+function geminiByModel(behaviour) {
+  const calls = [];
+  const fetchImpl = (url, init) => {
+    const model = url.match(/models\/([^:]+):/)[1];
+    calls.push(model);
+    const b = behaviour[model] || "ok";
+    if (b === "hang") {
+      return new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(Object.assign(new Error("timeout"), { name: "TimeoutError" }))));
+    }
+    if (typeof b === "number") {
+      return Promise.resolve(new Response(JSON.stringify({ error: { code: b, status: b === 503 ? "UNAVAILABLE" : "X", message: b === 400 ? "API key not valid. Please pass a valid API key." : "busy" } }), { status: b }));
+    }
+    return Promise.resolve(new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(GOOD) }] }, finishReason: "STOP" }] })));
+  };
+  return { fetchImpl, calls };
+}
+const FALLBACK_ENV = { ...ENV, GEMINI_MODEL: "fast-model,backup-model", ATTEMPT_TIMEOUT_MS: "200", TOTAL_TIMEOUT_MS: "2000" };
+
+test("falls back to the next model when the first is overloaded (503)", async () => {
+  const g = geminiByModel({ "fast-model": 503 });
+  const res = await worker.fetch(req({ text: "2 Gipfeli" }), FALLBACK_ENV, null, g.fetchImpl);
+  assert.equal(res.status, 200);
+  assert.deepEqual(g.calls, ["fast-model", "backup-model"]);
+});
+
+test("falls back when the first model hangs past the per-attempt timeout", async () => {
+  const g = geminiByModel({ "fast-model": "hang" });
+  const t0 = Date.now();
+  const res = await worker.fetch(req({ text: "2 Gipfeli" }), FALLBACK_ENV, null, g.fetchImpl);
+  assert.equal(res.status, 200);
+  assert.deepEqual(g.calls, ["fast-model", "backup-model"]);
+  assert.ok(Date.now() - t0 < 1500);
+});
+
+test("when every model is overloaded, says so clearly (503 overloaded)", async () => {
+  const g = geminiByModel({ "fast-model": 503, "backup-model": 503 });
+  const res = await worker.fetch(req({ text: "2 Gipfeli" }), FALLBACK_ENV, null, g.fetchImpl);
+  assert.equal(res.status, 503);
+  assert.equal((await res.json()).error.code, "overloaded");
+  assert.ok(g.calls.length >= 2);
+});
+
+test("a rejected API key is not retried on other models", async () => {
+  const g = geminiByModel({ "fast-model": 400 });
+  const res = await worker.fetch(req({ text: "2 Gipfeli" }), FALLBACK_ENV, null, g.fetchImpl);
+  assert.equal((await res.json()).error.code, "bad_key");
+  assert.deepEqual(g.calls, ["fast-model"]);
+});
+
+test("default model order starts with the fast Flash-Lite model", async () => {
+  const g = geminiByModel({});
+  const env = { ...ENV };
+  delete env.GEMINI_MODEL;
+  await worker.fetch(req({ text: "Apfel" }), env, null, g.fetchImpl);
+  assert.equal(g.calls[0], "gemini-3.5-flash-lite");
+});
