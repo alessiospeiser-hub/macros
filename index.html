@@ -275,6 +275,36 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
 .chip .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip .chip-kcal { color: var(--text-2); font-weight: 400; font-size: 13px; flex: none; }
 .chips-empty { font-size: 15px; color: var(--text-2); margin: 0 16px; }
+.chip-icon { width: 14px; height: 14px; flex: none; align-self: center; color: var(--text-2); }
+
+/* ---------- AI box ---------- */
+.ai-field { padding-right: 7px; }
+.ai-field input { text-align: left; }
+.ai-go {
+  flex: none; width: 40px; height: 40px; border-radius: 50%;
+  background: var(--accent); color: #fff; display: grid; place-items: center;
+  transition: transform 120ms var(--ease), opacity 120ms;
+}
+.ai-go:active { transform: scale(0.92); }
+.ai-go svg { width: 20px; height: 20px; }
+.ai-go.loading svg { display: none; }
+.ai-go.loading::after {
+  content: ""; width: 18px; height: 18px; border-radius: 50%;
+  border: 2.5px solid rgba(255, 255, 255, 0.4); border-top-color: #fff;
+  animation: spin 700ms linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.sugg { list-style: none; margin: 0; padding: 0; }
+.sugg button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 50px; padding: 0 16px; text-align: left; position: relative; transition: background 120ms; }
+.sugg button::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; border-top: 0.5px solid var(--sep); }
+.sugg button:active { background: var(--fill); }
+.sugg .s-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sugg .s-kcal { flex: none; font-size: 15px; color: var(--text-2); }
+.sugg .s-add { flex: none; font-size: 15px; font-weight: 600; color: var(--accent); }
+.ai-items { margin: 6px 16px 0; font-size: 13px; color: var(--text-2); }
+.ai-items div { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+.ai-items span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-items span:last-child { flex: none; }
 
 /* ---------- sheets ---------- */
 .backdrop {
@@ -326,7 +356,7 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
 
 @media (hover: hover) and (pointer: fine) {
   .row-main:hover, .hist-row:hover, .as-btn:hover { background: var(--fill); }
-  .chip:hover { background: var(--fill); }
+  .chip:hover, .sugg button:hover { background: var(--fill); }
   .icon-btn:hover { color: var(--text); }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -343,7 +373,7 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
       <div class="eyebrow" id="today-date"></div>
       <h1 id="today-title">Today</h1>
     </div>
-    <button class="icon-btn" id="open-settings" aria-label="Daily targets">
+    <button class="icon-btn" id="open-settings" aria-label="Settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
     </button>
   </header>
@@ -389,6 +419,17 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
   </div></div>
   <form class="page-body" id="add-form" novalidate autocomplete="off">
     <div class="card group">
+      <div class="field ai-field">
+        <input id="ai-text" type="text" placeholder="What did you eat?" maxlength="300" enterkeyhint="go" autocapitalize="sentences" autocorrect="off" spellcheck="false" aria-label="Describe what you ate">
+        <button type="button" class="ai-go" id="ai-go" aria-label="Estimate with AI">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M10.5 3.5l1.9 5.1 5.1 1.9-5.1 1.9-1.9 5.1-1.9-5.1-5.1-1.9 5.1-1.9z"/><path d="M18 14l.9 2.1 2.1.9-2.1.9L18 20l-.9-2.1-2.1-.9 2.1-.9z"/></svg>
+        </button>
+      </div>
+      <ul class="sugg" id="ai-sugg"></ul>
+    </div>
+    <p class="hint" id="ai-hint"></p>
+    <div class="ai-items" id="ai-items" hidden></div>
+    <div class="card group" style="margin-top:16px">
       <div class="field"><label for="f-name">Name</label><input id="f-name" type="text" placeholder="Optional" maxlength="60" enterkeyhint="next" autocapitalize="sentences"></div>
     </div>
     <div class="card group" style="margin-top:16px">
@@ -400,6 +441,10 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
     <p class="hint" id="add-hint">Leave calories empty to calculate them from macros.</p>
     <div class="section-label">Recent</div>
     <div class="chips" id="chips"></div>
+    <div id="yday-wrap" hidden>
+      <div class="section-label">Yesterday</div>
+      <div class="chips" id="yday"></div>
+    </div>
     <button type="submit" hidden></button>
   </form>
 </section>
@@ -426,17 +471,20 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
 <div class="sheet" id="sheet-settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
   <form class="sheet-card" id="settings-form" novalidate autocomplete="off">
     <div class="sheet-head">
-      <div class="sheet-title" id="settings-title">Daily targets</div>
+      <div class="sheet-title" id="settings-title">Settings</div>
       <button type="button" class="nav-btn end" data-close>Cancel</button>
     </div>
     <div class="group">
       <div class="field"><label for="t-kcal" class="lk">Calories</label><input id="t-kcal" inputmode="decimal" enterkeyhint="next"><span class="unit">kcal</span></div>
       <div class="field"><label for="t-p" class="lp">Protein</label><input id="t-p" inputmode="decimal" enterkeyhint="next"><span class="unit">g</span></div>
       <div class="field"><label for="t-f" class="lf">Fat</label><input id="t-f" inputmode="decimal" enterkeyhint="next"><span class="unit">g</span></div>
-      <div class="field"><label for="t-c" class="lc">Carbs</label><input id="t-c" inputmode="decimal" enterkeyhint="done"><span class="unit">g</span></div>
+      <div class="field"><label for="t-c" class="lc">Carbs</label><input id="t-c" inputmode="decimal" enterkeyhint="next"><span class="unit">g</span></div>
+    </div>
+    <div class="group">
+      <div class="field"><label for="t-code">AI code</label><input id="t-code" type="password" placeholder="Access code" autocomplete="off" autocapitalize="none" autocorrect="off" enterkeyhint="done"><span class="unit"></span></div>
     </div>
     <p class="hint" id="settings-hint"></p>
-    <button type="submit" class="btn-primary">Save targets</button>
+    <button type="submit" class="btn-primary">Save</button>
   </form>
 </div>
 
@@ -495,6 +543,11 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
   "use strict";
   var L = window.Logic;
   var STORE = "cal.v1";
+  var CODE_STORE = "cal.aicode";
+  // AI proxy (Cloudflare Worker in /worker). Local dev uses `node worker/dev.mjs`.
+  // Set AI_PROD_URL to your deployed Worker URL + "/estimate".
+  var AI_PROD_URL = "https://macros-ai.macros-ai.workers.dev/estimate";
+  var AI_URL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? "http://localhost:8787/estimate" : AI_PROD_URL;
   var DEFAULT_TARGETS = { kcal: 2750, p: 165, f: 70, c: 350 };
   var METRICS = [
     { k: "kcal", label: "Calories", unit: "kcal" },
@@ -869,10 +922,11 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
   }
   function resetAdd() {
     Object.keys(F).forEach(function (k) { F[k].value = ""; F[k].closest(".field").classList.remove("invalid"); });
-    updateAutoKcal(); setHint();
+    updateAutoKcal(); setHint(); resetAI();
   }
-  function openAdd() { resetAdd(); renderChips(); closeOpenRow(); openPage("page-add"); }
+  function openAdd() { resetAdd(); renderChips(); renderYesterday(); closeOpenRow(); openPage("page-add"); }
   function closeAdd() {
+    aiReq++; setAILoading(false);
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     closePage("page-add");
   }
@@ -882,8 +936,182 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
     F[k].addEventListener("input", function () {
       F[k].closest(".field").classList.remove("invalid");
       setHint();
+      if (k === "kcal") { if (filled) filled.kcalTouched = true; }
+      else followMacros();
       updateAutoKcal();
     });
+  });
+
+  /* ---------- AI estimate ---------- */
+  var AI = { text: $("ai-text"), go: $("ai-go"), sugg: $("ai-sugg"), hint: $("ai-hint"), items: $("ai-items") };
+  var AI_HINT = "Type a meal like “2 Gipfeli” to fill in the numbers below.";
+  var aiReq = 0;
+  // Values last filled in by the AI or from memory. While you haven't typed your own
+  // calories, editing a macro moves the calories along with it (4/9/4 kcal per gram).
+  var filled = null;
+
+  function r1(n) { return Math.round(n * 10) / 10; }
+  function getCode() { try { return localStorage.getItem(CODE_STORE) || ""; } catch (e) { return ""; } }
+  function setCode(v) { try { if (v) localStorage.setItem(CODE_STORE, v); else localStorage.removeItem(CODE_STORE); } catch (e) {} }
+
+  function aiMsg(msg, isError) {
+    AI.hint.textContent = msg || AI_HINT;
+    AI.hint.classList.toggle("error", !!isError);
+  }
+  function setAILoading(on) {
+    AI.go.classList.toggle("loading", on);
+    AI.go.setAttribute("aria-busy", String(on));
+    AI.text.readOnly = on;
+  }
+  function resetAI() {
+    aiReq++; setAILoading(false);
+    AI.text.value = ""; AI.sugg.innerHTML = ""; AI.items.hidden = true; AI.items.innerHTML = "";
+    filled = null; aiMsg();
+  }
+  function fillForm(name, v) {
+    F.name.value = name;
+    F.kcal.value = Math.round(v.kcal);
+    F.p.value = r1(v.p); F.f.value = r1(v.f); F.c.value = r1(v.c);
+    Object.keys(F).forEach(function (k) { F[k].closest(".field").classList.remove("invalid"); });
+    filled = { kcal: Math.round(v.kcal), p: r1(v.p), f: r1(v.f), c: r1(v.c), kcalTouched: false };
+    setHint(); updateAutoKcal();
+  }
+  function followMacros() {
+    if (!filled || filled.kcalTouched) return;
+    var p = L.parseNum(F.p.value) || 0, f = L.parseNum(F.f.value) || 0, c = L.parseNum(F.c.value) || 0;
+    var k = filled.kcal + 4 * (p - filled.p) + 9 * (f - filled.f) + 4 * (c - filled.c);
+    F.kcal.value = Math.max(0, Math.round(k));
+  }
+
+  // Autocomplete from saved foods: tap = log instantly, no AI call.
+  function matchFoods(q) {
+    q = q.trim().toLowerCase();
+    if (!q) return [];
+    return Object.keys(state.foods).map(function (k) { return state.foods[k]; })
+      .filter(function (f) { return f.name.toLowerCase().indexOf(q) !== -1; })
+      .sort(function (a, b) {
+        var sa = a.name.toLowerCase().indexOf(q) === 0 ? 0 : 1, sb = b.name.toLowerCase().indexOf(q) === 0 ? 0 : 1;
+        return (sa - sb) || (b.count - a.count) || (b.last - a.last);
+      })
+      .slice(0, 4);
+  }
+  function renderSugg() {
+    AI.sugg.innerHTML = matchFoods(AI.text.value).map(function (f) {
+      return '<li><button type="button" data-key="' + esc(f.name.toLowerCase()) + '" aria-label="Log ' + esc(f.name) + ', ' + fmtInt(f.kcal) + ' kcal">' +
+        '<span class="s-name">' + esc(f.name) + '</span><span class="s-kcal">' + fmtInt(f.kcal) + ' kcal</span><span class="s-add">Log</span></button></li>';
+    }).join("");
+  }
+  AI.text.addEventListener("input", function () { renderSugg(); if (AI.hint.classList.contains("error")) aiMsg(); });
+  AI.sugg.addEventListener("click", function (e) {
+    var b = e.target.closest("button");
+    var food = b && state.foods[b.dataset.key];
+    if (food) quickLog(food);
+  });
+  AI.text.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); runAI(); }
+  });
+  AI.go.addEventListener("click", runAI);
+
+  function aiErrorText(code) {
+    switch (code) {
+      case "rate_limited": return "Gemini’s free limit is used up for now. Wait a minute and try again, or type the numbers below.";
+      case "unauthorized": return "The AI code is missing or wrong. Add it in Settings (the button on Today).";
+      case "not_configured": case "bad_key": return "The AI server has no working Gemini API key yet. See the README.";
+      case "bad_model": return "That Gemini model isn’t available. Change GEMINI_MODEL in worker/wrangler.toml.";
+      case "not_food": return "That doesn’t look like food. Try describing it differently.";
+      case "timeout": return "The AI took too long to answer. Try again.";
+      case "offline": return "You’re offline. Type the numbers below instead.";
+      case "network": return "Couldn’t reach the AI. Check your connection and try again.";
+      case "no_url": return "AI isn’t set up yet. See the README to connect it.";
+      default: return "The AI’s answer couldn’t be used. Try again, or type the numbers below.";
+    }
+  }
+  function renderItems(items) {
+    AI.items.innerHTML = items.map(function (it) {
+      var label = it.name + (it.amount ? " · " + it.amount : "");
+      return '<div><span>' + esc(label) + '</span><span>' + fmtInt(it.kcal) + ' kcal</span></div>';
+    }).join("");
+    AI.items.hidden = !items.length;
+  }
+
+  function runAI() {
+    var text = AI.text.value.trim();
+    if (AI.go.classList.contains("loading")) return;
+    if (!text) { aiMsg("Type what you ate first.", true); AI.text.focus(); return; }
+    AI.sugg.innerHTML = "";
+    var saved = state.foods[text.toLowerCase()];
+    if (saved) {
+      fillForm(saved.name, saved); AI.items.hidden = true;
+      aiMsg("From your saved foods. Check it, then tap Save.");
+      return;
+    }
+    if (!AI_URL) { aiMsg(aiErrorText("no_url"), true); return; }
+    if (navigator.onLine === false) { aiMsg(aiErrorText("offline"), true); return; }
+
+    var id = ++aiReq;
+    setAILoading(true); aiMsg("Estimating…");
+    var ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, 30000);
+    fetch(AI_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-App-Code": getCode() },
+      body: JSON.stringify({ text: text }),
+      signal: ctl ? ctl.signal : undefined
+    })
+      .then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (body) {
+          if (!res.ok) throw { code: (body.error && body.error.code) || (res.status === 429 ? "rate_limited" : "http") };
+          var t = body.total;
+          if (!t || !Array.isArray(body.items)) throw { code: "bad_json" };
+          if (!body.items.length || !(t.kcal > 0 || t.protein > 0 || t.fat > 0 || t.carbs > 0)) throw { code: "not_food" };
+          return body;
+        });
+      })
+      .then(function (body) {
+        if (id !== aiReq) return; // closed or a newer request started
+        fillForm(text, { kcal: body.total.kcal, p: body.total.protein, f: body.total.fat, c: body.total.carbs });
+        renderItems(body.items);
+        aiMsg("Estimated by AI. Adjust anything, then tap Save.");
+      })
+      .catch(function (e) {
+        if (id !== aiReq) return;
+        var code = e && e.code ? e.code : (e && e.name === "AbortError" ? "timeout" : "network");
+        aiMsg(aiErrorText(code), true);
+      })
+      .then(function () { clearTimeout(timer); if (id === aiReq) setAILoading(false); });
+  }
+
+  /* ---------- one-tap logging (saved foods, recent, yesterday) ---------- */
+  function quickLog(food) {
+    var r = addEntry({ name: food.name, kcal: food.kcal, p: food.p, f: food.f, c: food.c });
+    closeAdd();
+    toast("Added " + (food.name || "entry"), function () {
+      removeEntry(r.key, r.entry.id);
+      var fd = food.name && state.foods[food.name.toLowerCase()];
+      if (fd && fd.count > 1) { fd.count--; save(); }
+    });
+  }
+
+  var ydayList = [];
+  function renderYesterday() {
+    var d = keyToDate(todayKey); d.setDate(d.getDate() - 1);
+    var seen = {};
+    ydayList = entriesFor(L.dateKey(d)).filter(function (e) {
+      var k = (e.name || "").toLowerCase() + "|" + L.entryKcal(e);
+      if (seen[k]) return false;
+      seen[k] = true; return true;
+    });
+    $("yday-wrap").hidden = !ydayList.length;
+    $("yday").innerHTML = ydayList.map(function (e, i) {
+      return '<button type="button" class="chip" data-i="' + i + '" aria-label="Repeat ' + esc(e.name || "entry") + ', ' + fmtInt(L.entryKcal(e)) + ' kcal">' +
+        '<svg class="chip-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 0 1 13.7-5.6L20 8.5M20 4v4.5h-4.5M20 12a8 8 0 0 1-13.7 5.6L4 15.5M4 20v-4.5h4.5"/></svg>' +
+        '<span class="chip-name">' + esc(e.name || "Entry") + '</span><span class="chip-kcal">' + fmtInt(L.entryKcal(e)) + '</span></button>';
+    }).join("");
+  }
+  $("yday").addEventListener("click", function (e) {
+    var b = e.target.closest(".chip");
+    var entry = b && ydayList[+b.dataset.i];
+    if (entry) quickLog({ name: entry.name, kcal: L.entryKcal(entry), p: entry.p, f: entry.f, c: entry.c });
   });
 
   function submitAdd() {
@@ -957,25 +1185,20 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
       if (!chip) return;
       if (fired) { fired = false; return; }
       var food = state.foods[chip.dataset.key];
-      if (!food) return;
-      var r = addEntry({ name: food.name, kcal: food.kcal, p: food.p, f: food.f, c: food.c });
-      closeAdd();
-      toast("Added " + food.name, function () {
-        removeEntry(r.key, r.entry.id);
-        var fd = state.foods[food.name.toLowerCase()];
-        if (fd && fd.count > 1) { fd.count--; save(); }
-      });
+      if (food) quickLog(food);
     });
   })();
 
   /* ---------- settings ---------- */
   var T = { kcal: $("t-kcal"), p: $("t-p"), f: $("t-f"), c: $("t-c") };
+  var TCODE = $("t-code");
   $("open-settings").addEventListener("click", function () {
     Object.keys(T).forEach(function (k) { T[k].value = state.targets[k]; T[k].closest(".field").classList.remove("invalid"); });
+    TCODE.value = getCode();
     $("settings-hint").textContent = ""; $("settings-hint").classList.remove("error");
     openSheet("sheet-settings");
   });
-  var tOrder = [T.kcal, T.p, T.f, T.c];
+  var tOrder = [T.kcal, T.p, T.f, T.c, TCODE];
   tOrder.forEach(function (input, i) {
     input.addEventListener("keydown", function (e) {
       if (e.key !== "Enter") return;
@@ -999,8 +1222,9 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
     }
     state.targets = next;
     if (state.days[todayKey]) state.days[todayKey].targets = Object.assign({}, next);
+    setCode(TCODE.value.trim());
     save(); render(); closeSheet();
-    toast("Targets saved");
+    toast("Settings saved");
   });
 
   /* ---------- history detail ---------- */

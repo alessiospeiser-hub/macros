@@ -1,2 +1,9 @@
 .claude/
 .DS_Store
+node_modules/
+
+# secrets: never commit
+.env
+.env.*
+worker/.dev.vars
+worker/.wrangler/

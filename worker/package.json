@@ -1,0 +1,10 @@
+{
+  "name": "macros-ai",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node dev.mjs",
+    "test": "node --test test/worker.test.mjs",
+    "deploy": "npx wrangler deploy"
+  }
+}

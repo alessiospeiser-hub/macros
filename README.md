@@ -40,6 +40,40 @@ To update later, drag the folder onto the site's "Deploys" page again.
 2. Tap the Share button, then **Add to Home Screen**, then **Add**.
 3. Launch it from the new icon. It opens full-screen without the Safari bars.
 
+## AI meal logging (Gemini)
+
+Type what you ate in the box at the top of the add page ("2 Gipfeli", "Coop Schinken-Käse Sandwich") and tap ✦. The AI fills in the numbers below. Adjust anything, then tap Save. Saved foods show up as suggestions while you type, and tapping one logs it instantly without calling the AI. The "Yesterday" chips re-log yesterday's meals.
+
+The Gemini API key never goes into the app or GitHub. It lives in a small Cloudflare Worker (`worker/`) that the app calls.
+
+### 1. Get a free Gemini API key
+Create one at https://aistudio.google.com/apikey (free tier, no credit card).
+
+### 2. Test locally
+```bash
+cp worker/.dev.vars.example worker/.dev.vars     # then paste your key into worker/.dev.vars
+node worker/dev.mjs                              # AI proxy on http://localhost:8787
+python3 -m http.server 8765                      # in a second terminal: the app
+```
+Open http://localhost:8765, tap +, and type a meal. If you set `APP_PASSCODE` in `.dev.vars`, enter the same code under Settings → AI code.
+`worker/.dev.vars` is gitignored. To try the UI without a key, run `MOCK_GEMINI=1 node worker/dev.mjs`.
+
+### 3. Deploy the Worker (free Cloudflare account)
+```bash
+cd worker
+npx wrangler login                        # opens the browser once
+npx wrangler secret put GEMINI_API_KEY    # paste the key when asked
+npx wrangler secret put APP_PASSCODE      # pick any code, e.g. 6+ characters
+npx wrangler deploy                       # prints https://macros-ai.<you>.workers.dev
+```
+Put that URL plus `/estimate` into `AI_PROD_URL` in `index.html`, push, then enter your code on the phone under Settings → AI code. (Current Worker: https://macros-ai.macros-ai.workers.dev)
+
+### Model and limits
+- The model is set in `worker/wrangler.toml` (`GEMINI_MODEL`, default `gemini-3.8-flash`). To change it, edit that line and run `npx wrangler deploy`. No app change is needed.
+- If Gemini's free limit is reached, the app says so, and you can type the numbers by hand.
+- On the free tier, Google may use what you type to improve its products.
+- Worker tests: `node --test worker/test/worker.test.mjs`
+
 ## Good to know
 - **Your data lives only on that device**, inside the installed app. Deleting the home-screen app, or clearing Safari website data, erases it. There's no backup or sync.
 - **Updates:** after you upload a new version, open the app twice. The first launch downloads the update in the background, and the second one shows it.

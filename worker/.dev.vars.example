@@ -1,0 +1,4 @@
+# Copy this file to worker/.dev.vars and fill in your values.
+# worker/.dev.vars is gitignored and never committed.
+GEMINI_API_KEY=paste-your-key-here
+APP_PASSCODE=pick-any-code

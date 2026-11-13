@@ -1,0 +1,13 @@
+name = "macros-ai"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+# Change the model here without touching code. Free Flash models (Nov 2026):
+# gemini-3.8-flash (default), gemini-3.5-flash-lite (faster, a bit less accurate).
+GEMINI_MODEL = "gemini-3.8-flash"
+ALLOWED_ORIGINS = "https://alessiospeiser-hub.github.io,http://localhost:8765,http://127.0.0.1:8765,http://localhost:8000"
+
+# Secrets are NOT stored here. Set them once with:
+#   npx wrangler secret put GEMINI_API_KEY
+#   npx wrangler secret put APP_PASSCODE
