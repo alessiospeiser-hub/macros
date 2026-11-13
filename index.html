@@ -481,7 +481,7 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
       <div class="field"><label for="t-c" class="lc">Carbs</label><input id="t-c" inputmode="decimal" enterkeyhint="next"><span class="unit">g</span></div>
     </div>
     <div class="group">
-      <div class="field"><label for="t-code">Code</label><input id="t-code" type="password" placeholder="For AI and sync" autocomplete="off" autocapitalize="none" autocorrect="off" enterkeyhint="done"><span class="unit"></span></div>
+      <div class="field"><label for="t-name">Name</label><input id="t-name" type="text" placeholder="For sync, e.g. alessio42" maxlength="40" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="done"><span class="unit"></span></div>
     </div>
     <p class="hint" id="sync-status"></p>
     <p class="hint" id="settings-hint"></p>
@@ -593,7 +593,8 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
   "use strict";
   var L = window.Logic;
   var STORE = "cal.v1";
-  var CODE_STORE = "cal.aicode";
+  var NAME_STORE = "cal.name"; // sync account: each name has its own data in the cloud
+  try { localStorage.removeItem("cal.aicode"); } catch (e) {} // old access code, no longer used
   // AI proxy (Cloudflare Worker in /worker). Local dev uses `node worker/dev.mjs`.
   // Set AI_PROD_URL to your deployed Worker URL + "/estimate".
   var AI_PROD_URL = "https://macros-ai.macros-ai.workers.dev/estimate";
@@ -879,22 +880,22 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
     if (r) toast("Deleted " + (r.entry.name || "entry"), function () { restoreEntry(r); });
   }
 
-  /* ---------- cloud sync (Worker /sync, same code as the AI) ---------- */
+  /* ---------- cloud sync (Worker /sync, one account per name) ---------- */
   var SYNC_URL = AI_URL ? AI_URL.replace(/\/estimate$/, "/sync") : "";
   var sync = { timer: null, busy: false, again: false, at: 0, error: null, announce: false };
 
   function canon(s) { return L.mergeState(s, null); }
   function scheduleSync(delay) {
-    if (!SYNC_URL || !getCode()) return;
+    if (!SYNC_URL || !getName()) return;
     clearTimeout(sync.timer);
     sync.timer = setTimeout(syncNow, delay == null ? 1200 : delay);
   }
-  function syncApi(method, body) {
+  function syncApi(method, body, name) {
     var ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
     var timer = setTimeout(function () { if (ctl) ctl.abort(); }, 20000);
     return fetch(SYNC_URL, {
       method: method,
-      headers: { "Content-Type": "application/json", "X-App-Code": getCode() },
+      headers: { "Content-Type": "application/json", "X-Sync-Name": name },
       body: body ? JSON.stringify(body) : undefined,
       cache: "no-store",
       signal: ctl ? ctl.signal : undefined
@@ -911,19 +912,21 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
   // Pull, merge with this device, push back if anything is new. A 409 means another
   // device saved in between: pull again and re-merge, so nothing is overwritten.
   function syncOnce(tries) {
-    return syncApi("GET").then(function (remote) {
+    var name = getName();
+    return syncApi("GET", null, name).then(function (remote) {
+      if (getName() !== name) return; // switched to another name meanwhile: don't mix data
       var merged = normalize(L.mergeState(state, remote.state));
       if (JSON.stringify(merged) !== JSON.stringify(state)) { state = merged; persist(); render(); }
       var mine = canon(state);
       if (remote.state && JSON.stringify(mine) === JSON.stringify(canon(remote.state))) return;
-      return syncApi("PUT", { state: mine, baseVersion: remote.version || 0 }).catch(function (e) {
+      return syncApi("PUT", { state: mine, baseVersion: remote.version || 0 }, name).catch(function (e) {
         if (e.code === "conflict" && tries < 3) return syncOnce(tries + 1);
         throw e;
       });
     });
   }
   function syncNow() {
-    if (!SYNC_URL || !getCode()) { renderSyncStatus(); return; }
+    if (!SYNC_URL || !getName()) { renderSyncStatus(); return; }
     if (sync.busy) { sync.again = true; return; }
     clearTimeout(sync.timer);
     var announce = sync.announce; sync.announce = false;
@@ -939,8 +942,7 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
   }
   // Short result shown as a toast right after the code is entered (Settings closes on save).
   function syncResultText() {
-    if (!sync.error) return "Synced. Your data is on all your devices.";
-    if (sync.error === "unauthorized") return "Sync failed: the code is wrong.";
+    if (!sync.error) return "Synced as “" + getName() + "”. Your data is on all your devices.";
     if (sync.error === "offline") return "Offline. It will sync when you’re back online.";
     return "Sync failed. It will try again automatically.";
   }
@@ -948,14 +950,13 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
     var el = $("sync-status");
     if (!SYNC_URL) { el.textContent = ""; return; }
     var msg;
-    if (!getCode()) msg = "Add your code to use AI and keep your data in sync on all your devices.";
+    if (!getName()) msg = "Add a name to keep your data on all your devices. Pick something unique: anyone who enters the same name sees the same data.";
     else if (sync.busy && !sync.at) msg = "Syncing…";
-    else if (sync.error === "unauthorized") msg = "Sync failed: the code is wrong.";
     else if (sync.error === "offline") msg = "Offline. Your changes will sync when you’re back online.";
     else if (sync.error) msg = "Sync failed. It will try again automatically.";
     else if (sync.at) {
       var mins = Math.floor((Date.now() - sync.at) / 60000);
-      msg = "Synced " + (mins < 1 ? "just now" : mins + " min ago") + ". Your data is backed up and on all your devices.";
+      msg = "Synced as “" + getName() + "” " + (mins < 1 ? "just now" : mins + " min ago") + ". Enter the same name on your other devices.";
     } else msg = "Syncing…";
     el.textContent = msg;
     el.classList.toggle("error", !!sync.error && sync.error !== "offline");
@@ -1097,8 +1098,10 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
   var filled = null;
 
   function r1(n) { return Math.round(n * 10) / 10; }
-  function getCode() { try { return localStorage.getItem(CODE_STORE) || ""; } catch (e) { return ""; } }
-  function setCode(v) { try { if (v) localStorage.setItem(CODE_STORE, v); else localStorage.removeItem(CODE_STORE); } catch (e) {} }
+  // Same rule as the server: case-insensitive, extra spaces ignored, max 40 characters.
+  function normName(v) { return String(v || "").trim().replace(/\s+/g, " ").toLowerCase().slice(0, 40); }
+  function getName() { try { return normName(localStorage.getItem(NAME_STORE)); } catch (e) { return ""; } }
+  function setName(v) { try { if (v) localStorage.setItem(NAME_STORE, v); else localStorage.removeItem(NAME_STORE); } catch (e) {} }
 
   function aiMsg(msg, isError) {
     AI.hint.textContent = msg || AI_HINT;
@@ -1161,7 +1164,6 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
   function aiErrorText(code) {
     switch (code) {
       case "rate_limited": return "Gemini’s free limit is used up for now. Wait a minute and try again, or type the numbers below.";
-      case "unauthorized": return "The AI code is missing or wrong. Add it in Settings (the button on Today).";
       case "not_configured": case "bad_key": return "The AI server has no working Gemini API key yet. See the README.";
       case "bad_model": return "That Gemini model isn’t available. Change GEMINI_MODEL in worker/wrangler.toml.";
       case "not_food": return "That doesn’t look like food. Try describing it differently.";
@@ -1202,7 +1204,7 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
     var timer = setTimeout(function () { if (ctl) ctl.abort(); }, 30000);
     fetch(AI_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-App-Code": getCode() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: text }),
       signal: ctl ? ctl.signal : undefined
     })
@@ -1341,15 +1343,15 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
 
   /* ---------- settings ---------- */
   var T = { kcal: $("t-kcal"), p: $("t-p"), f: $("t-f"), c: $("t-c") };
-  var TCODE = $("t-code");
+  var TNAME = $("t-name");
   $("open-settings").addEventListener("click", function () {
     Object.keys(T).forEach(function (k) { T[k].value = state.targets[k]; T[k].closest(".field").classList.remove("invalid"); });
-    TCODE.value = getCode();
+    TNAME.value = getName();
     renderSyncStatus();
     $("settings-hint").textContent = ""; $("settings-hint").classList.remove("error");
     openSheet("sheet-settings");
   });
-  var tOrder = [T.kcal, T.p, T.f, T.c, TCODE];
+  var tOrder = [T.kcal, T.p, T.f, T.c, TNAME];
   tOrder.forEach(function (input, i) {
     input.addEventListener("keydown", function (e) {
       if (e.key !== "Enter") return;
@@ -1371,14 +1373,24 @@ h2 small { font-size: 15px; font-weight: 400; color: var(--text-2); }
       $("settings-hint").classList.add("error");
       return;
     }
-    var changed = JSON.stringify(next) !== JSON.stringify(state.targets);
-    state.targets = next;
-    if (changed) state.targetsAt = Date.now();
-    if (state.days[todayKey]) state.days[todayKey].targets = Object.assign({}, next);
-    var codeChanged = TCODE.value.trim() !== getCode();
-    setCode(TCODE.value.trim());
-    if (codeChanged) sync.error = null;
-    if (codeChanged && getCode()) sync.announce = true;
+    var name = normName(TNAME.value), prev = getName();
+    var nameChanged = name !== prev;
+    // Switching from one name to another: this device shows the other person's data.
+    // The first name ever entered keeps what's already on the device and uploads it.
+    var switching = nameChanged && prev && name;
+    if (switching && !confirm("Switch to “" + name + "”? This device will show " + name + "’s data. The data of “" + prev + "” stays saved under that name.")) return;
+    if (switching) {
+      clearTimeout(sync.timer);
+      state = normalize(null);
+    } else {
+      var changed = JSON.stringify(next) !== JSON.stringify(state.targets);
+      state.targets = next;
+      if (changed) state.targetsAt = Date.now();
+      if (state.days[todayKey]) state.days[todayKey].targets = Object.assign({}, next);
+    }
+    setName(name);
+    if (nameChanged) { sync.error = null; sync.at = 0; }
+    if (nameChanged && name) sync.announce = true;
     save(); render(); closeSheet();
     toast(sync.announce ? "Settings saved. Syncing…" : "Settings saved");
     syncNow();

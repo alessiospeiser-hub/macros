@@ -10,9 +10,8 @@ ALLOWED_ORIGINS = "https://alessiospeiser-hub.github.io,http://localhost:8765,ht
 
 # Secrets are NOT stored here. Set them once with:
 #   npx wrangler secret put GEMINI_API_KEY
-#   npx wrangler secret put APP_PASSCODE
 
-# Cloud sync storage (your data, shared by all your devices)
+# Cloud sync storage: one row per name, shared by that person's devices
 [[d1_databases]]
 binding = "DB"
 database_name = "macros-db"

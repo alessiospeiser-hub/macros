@@ -1,15 +1,14 @@
 // Macros AI proxy: keeps the Gemini API key server-side and returns
 // calorie + macro estimates as validated JSON.
 //
-// POST /estimate   body: {"text": "2 Gipfeli"}   header: X-App-Code: <APP_PASSCODE>
+// POST /estimate   body: {"text": "2 Gipfeli"}   (open to the app; no code needed)
 // -> 200 {"items":[...],"total":{"kcal","protein","carbs","fat"}}
 // -> 4xx/5xx {"error":{"code","message"}}
 //
 // Config (wrangler.toml [vars] / secrets / .dev.vars):
 //   GEMINI_API_KEY   secret, required
-//   APP_PASSCODE     secret, optional but recommended for a public app
 //   GEMINI_MODEL     comma-separated models, tried in order (defaults to DEFAULT_MODELS)
-//   ALLOWED_ORIGINS  comma-separated list of origins allowed to call this
+//   ALLOWED_ORIGINS  comma-separated list of origins allowed to call this (others get 403)
 
 // Free-tier Flash models are often overloaded (503 "high demand") or slow. Flash-Lite
 // answered in ~1 s every time in testing, so it goes first; if a model is busy,
@@ -90,7 +89,7 @@ function corsHeaders(origin) {
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-App-Code",
+    "Access-Control-Allow-Headers": "Content-Type, X-Sync-Name",
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin",
   };
@@ -104,11 +103,10 @@ function json(status, body, origin, extra = {}) {
 }
 const fail = (status, code, message, origin, extra) => json(status, { error: { code, message } }, origin, extra);
 
-function sameSecret(a, b) {
-  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
+/** "  Alessio " -> "alessio". Returns "" if missing or longer than 40 characters. */
+export function normalizeName(raw) {
+  const name = String(raw || "").trim().replace(/\s+/g, " ").toLowerCase();
+  return name.length > 0 && name.length <= 40 ? name : "";
 }
 
 function modelList(env) {
@@ -203,13 +201,11 @@ export async function handle(request, env, fetchImpl = fetch) {
   const allowed = String(env.ALLOWED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean);
   const okOrigin = origin && allowed.includes(origin) ? origin : null;
 
-  if (origin && !okOrigin) return fail(403, "forbidden_origin", "This origin is not allowed.", null);
-  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: okOrigin ? corsHeaders(okOrigin) : {} });
+  // Only the app itself may call this (blocks other websites and casual scripting).
+  if (!okOrigin) return fail(403, "forbidden_origin", "This origin is not allowed.", null);
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(okOrigin) });
   if (url.pathname !== "/estimate" && url.pathname !== "/sync") return fail(404, "not_found", "Not found.", okOrigin);
 
-  if (env.APP_PASSCODE && !sameSecret(request.headers.get("X-App-Code") || "", String(env.APP_PASSCODE))) {
-    return fail(401, "unauthorized", "Missing or wrong access code.", okOrigin);
-  }
   if (url.pathname === "/sync") return handleSync(request, env, okOrigin);
   if (request.method !== "POST") return fail(405, "method_not_allowed", "Use POST.", okOrigin);
   if (!env.GEMINI_API_KEY) return fail(500, "not_configured", "GEMINI_API_KEY is not set on the server.", okOrigin);
@@ -225,13 +221,14 @@ export async function handle(request, env, fetchImpl = fetch) {
   return fail(r.status, r.code, r.code === "upstream" ? r.msg : (MESSAGES[r.code] || "Gemini error."), okOrigin);
 }
 
-// ---------- /sync: one copy of the app data, shared by all your devices ----------
+// ---------- /sync: one copy of each person's data, shared by all their devices ----------
+// Every request carries header X-Sync-Name; each name (case-insensitive) has its own row.
 // GET  /sync -> {"state": {...} | null, "version": n}
 // PUT  /sync  body {"state": {...}, "baseVersion": n} -> {"version": n+1}
 //      409 {"error":{"code":"conflict"}, "version": current} if someone else saved first;
 //      the app then pulls, merges and retries, so no device overwrites another.
-// Stored gzip-compressed in one D1 row (binding DB). Requires APP_PASSCODE.
-const SYNC_MAX_BYTES = 8_000_000;
+// Stored gzip-compressed, one D1 row per name (binding DB).
+const SYNC_MAX_BYTES = 2_000_000;
 let tableReady = false;
 
 async function ensureTable(db) {
@@ -249,12 +246,14 @@ async function gunzip(bytes) {
 }
 
 async function handleSync(request, env, origin) {
-  if (!env.APP_PASSCODE) return fail(500, "not_configured", "Set APP_PASSCODE to enable sync.", origin);
+  const name = normalizeName(request.headers.get("X-Sync-Name"));
+  if (!name) return fail(400, "name_required", "Enter a name (up to 40 characters) to sync.", origin);
+  const id = "user:" + name;
   if (!env.DB) return fail(500, "not_configured", "Sync storage (D1 binding DB) is not set up.", origin);
   await ensureTable(env.DB);
 
   if (request.method === "GET") {
-    const row = await env.DB.prepare("SELECT data, version, updated FROM store WHERE id = 'main'").first();
+    const row = await env.DB.prepare("SELECT data, version, updated FROM store WHERE id = ?").bind(id).first();
     if (!row) return json(200, { state: null, version: 0 }, origin, { "Cache-Control": "no-store" });
     return json(200, { state: JSON.parse(await gunzip(row.data)), version: row.version, updated: row.updated }, origin, { "Cache-Control": "no-store" });
   }
@@ -273,10 +272,10 @@ async function handleSync(request, env, origin) {
     const data = await gzip(text);
     const now = Date.now();
     const result = base === 0
-      ? await env.DB.prepare("INSERT OR IGNORE INTO store (id, data, version, updated) VALUES ('main', ?, 1, ?)").bind(data, now).run()
-      : await env.DB.prepare("UPDATE store SET data = ?, version = version + 1, updated = ? WHERE id = 'main' AND version = ?").bind(data, now, base).run();
+      ? await env.DB.prepare("INSERT OR IGNORE INTO store (id, data, version, updated) VALUES (?, ?, 1, ?)").bind(id, data, now).run()
+      : await env.DB.prepare("UPDATE store SET data = ?, version = version + 1, updated = ? WHERE id = ? AND version = ?").bind(data, now, id, base).run();
     if (!result.meta || !result.meta.changes) {
-      const row = await env.DB.prepare("SELECT data, version, updated FROM store WHERE id = 'main'").first();
+      const row = await env.DB.prepare("SELECT data, version, updated FROM store WHERE id = ?").bind(id).first();
       return json(409, { error: { code: "conflict", message: "Data changed on another device." }, version: row ? row.version : 0 }, origin);
     }
     return json(200, { version: base + 1, updated: now }, origin);

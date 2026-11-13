@@ -7,14 +7,13 @@ const ORIGIN = "https://alessiospeiser-hub.github.io";
 const ENV = {
   GEMINI_API_KEY: "test-key",
   GEMINI_MODEL: "gemini-test-flash",
-  APP_PASSCODE: "1234",
   ALLOWED_ORIGINS: ORIGIN + ",http://localhost:8765",
 };
 
-function req(body, { origin = ORIGIN, code = "1234", method = "POST", path = "/estimate" } = {}) {
+function req(body, { origin = ORIGIN, name = "alessio", method = "POST", path = "/estimate" } = {}) {
   const headers = { "Content-Type": "application/json" };
   if (origin) headers.Origin = origin;
-  if (code) headers["X-App-Code"] = code;
+  if (name) headers["X-Sync-Name"] = name;
   return new Request("https://worker.example" + path, {
     method,
     headers,
@@ -97,11 +96,17 @@ test("unreadable model output becomes bad_json, not a crash", async () => {
   assert.equal((await res.json()).error.code, "bad_json");
 });
 
-test("wrong or missing access code is rejected before calling Gemini", async () => {
+test("AI works without any code or name (open to everyone using the app)", async () => {
   const g = gemini(JSON.stringify(GOOD));
-  const res = await worker.fetch(req({ text: "Apfel" }, { code: "0000" }), ENV, null, g.fetchImpl);
-  assert.equal(res.status, 401);
-  assert.equal((await res.json()).error.code, "unauthorized");
+  const res = await worker.fetch(req({ text: "Apfel" }, { name: "" }), { ...ENV, APP_PASSCODE: "old-secret" }, null, g.fetchImpl);
+  assert.equal(res.status, 200);
+  assert.equal(g.calls.length, 1);
+});
+
+test("requests without the app's Origin are rejected (no direct scripting)", async () => {
+  const g = gemini(JSON.stringify(GOOD));
+  const res = await worker.fetch(req({ text: "Apfel" }, { origin: null }), ENV, null, g.fetchImpl);
+  assert.equal(res.status, 403);
   assert.equal(g.calls.length, 0);
 });
 
@@ -116,7 +121,7 @@ test("CORS preflight is answered for allowed origins", async () => {
   const res = await worker.fetch(req(null, { method: "OPTIONS" }), ENV, null, gemini("").fetchImpl);
   assert.equal(res.status, 204);
   assert.equal(res.headers.get("Access-Control-Allow-Origin"), ORIGIN);
-  assert.match(res.headers.get("Access-Control-Allow-Headers"), /X-App-Code/i);
+  assert.match(res.headers.get("Access-Control-Allow-Headers"), /X-Sync-Name/i);
 });
 
 test("empty or too long text is a 400", async () => {
@@ -133,23 +138,30 @@ test("missing API key reports not_configured", async () => {
 
 // ---------- /sync ----------
 function fakeDB() {
-  let row = null;
+  const rows = new Map();
   const db = {
-    get row() { return row; },
+    rows,
     prepare(sql) {
       const stmt = (args) => ({
         bind: (...a) => stmt(a),
-        async first() { return /^SELECT/.test(sql) && row ? { ...row } : null; },
+        async first() {
+          if (!/^SELECT/.test(sql)) return null;
+          const r = rows.get(args[0]);
+          return r ? { ...r } : null;
+        },
         async run() {
           if (/^CREATE/.test(sql)) return { meta: { changes: 0 } };
           if (/^INSERT/.test(sql)) {
-            if (row) return { meta: { changes: 0 } };
-            row = { data: args[0], version: 1, updated: args[1] };
+            const [id, data, updated] = args;
+            if (rows.has(id)) return { meta: { changes: 0 } };
+            rows.set(id, { data, version: 1, updated });
             return { meta: { changes: 1 } };
           }
           if (/^UPDATE/.test(sql)) {
-            if (!row || row.version !== args[2]) return { meta: { changes: 0 } };
-            row = { data: args[0], version: row.version + 1, updated: args[1] };
+            const [data, updated, id, base] = args;
+            const r = rows.get(id);
+            if (!r || r.version !== base) return { meta: { changes: 0 } };
+            rows.set(id, { data, version: r.version + 1, updated });
             return { meta: { changes: 1 } };
           }
           throw new Error("unexpected SQL " + sql);
@@ -167,7 +179,7 @@ const STATE = { targets: { kcal: 2750, p: 165, f: 70, c: 350 }, days: { "2026-11
 
 test("sync: empty store returns null state at version 0", async () => {
   const env = { ...ENV, DB: fakeDB() };
-  const res = await worker.fetch(new Request("https://w/sync", { method: "GET", headers: { Origin: ORIGIN, "X-App-Code": "1234" } }), env);
+  const res = await worker.fetch(syncReq("GET"), env);
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { state: null, version: 0 });
 });
@@ -177,8 +189,8 @@ test("sync: PUT then GET round-trips the data (stored compressed)", async () => 
   const put = await worker.fetch(syncReq("PUT", { state: STATE, baseVersion: 0 }), env);
   assert.equal(put.status, 200);
   assert.equal((await put.json()).version, 1);
-  assert.ok(env.DB.row.data instanceof Uint8Array);
-  const get = await worker.fetch(new Request("https://w/sync", { method: "GET", headers: { Origin: ORIGIN, "X-App-Code": "1234" } }), env);
+  assert.ok(env.DB.rows.get("user:alessio").data instanceof Uint8Array);
+  const get = await worker.fetch(syncReq("GET"), env);
   const body = await get.json();
   assert.equal(body.version, 1);
   assert.deepEqual(body.state, STATE);
@@ -191,21 +203,34 @@ test("sync: stale baseVersion is a 409 conflict, nothing overwritten", async () 
   assert.equal(res.status, 409);
   const body = await res.json();
   assert.equal(body.error.code, "conflict");
-  assert.equal(env.DB.row.version, 1);
+  assert.equal(env.DB.rows.get("user:alessio").version, 1);
 });
 
-test("sync: wrong code is rejected", async () => {
+test("sync: each name has its own separate data", async () => {
   const env = { ...ENV, DB: fakeDB() };
-  const res = await worker.fetch(syncReq("PUT", { state: STATE, baseVersion: 0 }, { code: "nope" }), env);
-  assert.equal(res.status, 401);
-  assert.equal(env.DB.row, null);
+  await worker.fetch(syncReq("PUT", { state: STATE, baseVersion: 0 }, { name: "alessio" }), env);
+  const other = await (await worker.fetch(syncReq("GET", null, { name: "marco" }), env)).json();
+  assert.deepEqual(other, { state: null, version: 0 });
+  const mine = await (await worker.fetch(syncReq("GET", null, { name: "alessio" }), env)).json();
+  assert.deepEqual(mine.state, STATE);
 });
 
-test("sync: refuses to run without a passcode configured", async () => {
-  const env = { ...ENV, APP_PASSCODE: "", DB: fakeDB() };
-  const res = await worker.fetch(syncReq("PUT", { state: STATE, baseVersion: 0 }), env);
-  assert.equal(res.status, 500);
-  assert.equal((await res.json()).error.code, "not_configured");
+test("sync: names ignore case and extra spaces", async () => {
+  const env = { ...ENV, DB: fakeDB() };
+  await worker.fetch(syncReq("PUT", { state: STATE, baseVersion: 0 }, { name: "Alessio" }), env);
+  const res = await (await worker.fetch(syncReq("GET", null, { name: "  ALESSIO " }), env)).json();
+  assert.deepEqual(res.state, STATE);
+  assert.deepEqual([...env.DB.rows.keys()], ["user:alessio"]);
+});
+
+test("sync: a missing or too long name is a 400 name_required", async () => {
+  const env = { ...ENV, DB: fakeDB() };
+  for (const name of ["", "   ", "x".repeat(41)]) {
+    const res = await worker.fetch(syncReq("GET", null, { name }), env);
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error.code, "name_required");
+  }
+  assert.equal(env.DB.rows.size, 0);
 });
 
 test("sync: invalid body is a 400", async () => {
